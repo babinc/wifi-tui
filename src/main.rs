@@ -21,6 +21,14 @@ fn main() -> Result<()> {
         }
     };
 
+    // Install a panic hook that restores the terminal before printing the error.
+    // Without this, a panic leaves the terminal in raw/alternate-screen mode.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        ratatui::restore();
+        default_hook(info);
+    }));
+
     let terminal = ratatui::init();
     let result = run(terminal, device);
     ratatui::restore();

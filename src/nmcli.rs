@@ -311,7 +311,9 @@ fn parse_terse_line(line: &str) -> Vec<String> {
 
 /// Translate nmcli error messages into beginner-friendly text.
 fn friendly_error(msg: &str) -> String {
-    if msg.contains("No network with SSID") {
+    if msg.contains("No such file or directory") || msg.contains("not found") && msg.contains("nmcli") {
+        "nmcli is not installed. Install NetworkManager to use wifi-tui.".to_string()
+    } else if msg.contains("No network with SSID") {
         "Network not found. It may be out of range or hidden.".to_string()
     } else if msg.contains("Secrets were required, but not provided") {
         "Password required. This network needs a password to connect.".to_string()

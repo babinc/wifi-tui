@@ -50,6 +50,7 @@ pub struct App {
     // Auto-refresh
     pub ticks_since_scan: u32,
     pub spinner_frame: usize,
+    pending_scan_tasks: u8,
 }
 
 const AUTO_REFRESH_TICKS: u32 = 120; // 30s at 250ms tick rate
@@ -81,6 +82,7 @@ impl App {
 
             ticks_since_scan: AUTO_REFRESH_TICKS, // trigger immediate scan
             spinner_frame: 0,
+            pending_scan_tasks: 0,
         }
     }
 
@@ -205,29 +207,47 @@ impl App {
 
     fn handle_modal_key(&mut self, key: KeyEvent, modal: &Modal, events: &EventLoop) {
         match modal {
-            Modal::PasswordInput => match key.code {
-                KeyCode::Esc => {
-                    self.modal = None;
-                    self.password.clear();
+            Modal::PasswordInput => {
+                // Ctrl+U clears password, Ctrl+W deletes last word
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    match key.code {
+                        KeyCode::Char('u') => self.password.clear(),
+                        KeyCode::Char('w') => {
+                            let trimmed = self.password.trim_end().to_string();
+                            if let Some(pos) = trimmed.rfind(' ') {
+                                self.password = trimmed[..=pos].to_string();
+                            } else {
+                                self.password.clear();
+                            }
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Esc => {
+                            self.modal = None;
+                            self.password.clear();
+                        }
+                        KeyCode::Enter => {
+                            let ssid = self.password_target_ssid.clone();
+                            let pw = self.password.clone();
+                            self.modal = None;
+                            self.bg_status = BgStatus::Connecting;
+                            events.send_task(Task::Connect(ssid, Some(pw)));
+                        }
+                        KeyCode::Backspace => {
+                            self.password.pop();
+                        }
+                        KeyCode::Tab => {
+                            self.password_visible = !self.password_visible;
+                        }
+                        KeyCode::Char(c) => {
+                            self.password.push(c);
+                        }
+                        _ => {}
+                    }
                 }
-                KeyCode::Enter => {
-                    let ssid = self.password_target_ssid.clone();
-                    let pw = self.password.clone();
-                    self.modal = None;
-                    self.bg_status = BgStatus::Connecting;
-                    events.send_task(Task::Connect(ssid, Some(pw)));
-                }
-                KeyCode::Backspace => {
-                    self.password.pop();
-                }
-                KeyCode::Tab => {
-                    self.password_visible = !self.password_visible;
-                }
-                KeyCode::Char(c) => {
-                    self.password.push(c);
-                }
-                _ => {}
-            },
+            }
             Modal::ConfirmDisconnect => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.modal = None;
@@ -268,13 +288,22 @@ impl App {
         }
     }
 
-    /// Start a scan + status refresh.
+    /// Start a scan + status refresh. Queues 3 serialized tasks.
     fn start_scan(&mut self, events: &EventLoop) {
         self.bg_status = BgStatus::Scanning;
         self.ticks_since_scan = 0;
+        self.pending_scan_tasks = 3;
         events.send_task(Task::Scan(self.device.clone()));
         events.send_task(Task::RefreshStatus(self.device.clone()));
         events.send_task(Task::RefreshSaved);
+    }
+
+    /// Decrement pending scan task counter; set Idle when all done.
+    fn scan_task_done(&mut self) {
+        self.pending_scan_tasks = self.pending_scan_tasks.saturating_sub(1);
+        if self.pending_scan_tasks == 0 && self.bg_status == BgStatus::Scanning {
+            self.bg_status = BgStatus::Idle;
+        }
     }
 
     /// Handle a completed background task.
@@ -284,13 +313,15 @@ impl App {
         match result {
             TaskResult::ScanComplete(Ok(networks)) => {
                 self.networks = networks;
-                if self.net_index >= self.networks.len() && !self.networks.is_empty() {
+                if self.networks.is_empty() {
+                    self.net_index = 0;
+                } else if self.net_index >= self.networks.len() {
                     self.net_index = self.networks.len() - 1;
                 }
-                self.bg_status = BgStatus::Idle;
+                self.scan_task_done();
             }
             TaskResult::ScanComplete(Err(e)) => {
-                self.bg_status = BgStatus::Idle;
+                self.scan_task_done();
                 self.modal = Some(Modal::Message(e));
             }
             TaskResult::ConnectComplete(Ok(msg), _ssid) => {
@@ -330,16 +361,19 @@ impl App {
             }
             TaskResult::StatusUpdate(status) => {
                 self.status = status;
-                // Don't change bg_status here - scan result will do that
+                self.scan_task_done();
             }
             TaskResult::SavedUpdate(Ok(saved)) => {
                 self.saved = saved;
-                if self.saved_index >= self.saved.len() && !self.saved.is_empty() {
+                if self.saved.is_empty() {
+                    self.saved_index = 0;
+                } else if self.saved_index >= self.saved.len() {
                     self.saved_index = self.saved.len() - 1;
                 }
+                self.scan_task_done();
             }
             TaskResult::SavedUpdate(Err(_)) => {
-                // Silently ignore - saved list will just be stale
+                self.scan_task_done();
             }
         }
     }
